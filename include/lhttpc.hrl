@@ -24,22 +24,11 @@
 %%% ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%% ----------------------------------------------------------------------------
 
--type header() :: {string() | atom(), string()}.
--type headers() :: [header()].
-
--type socket() :: _.
-
--type option() ::
-        {connect_timeout, timeout()} |
-        {send_retry, non_neg_integer()} |
-        {partial_upload, non_neg_integer() | infinity} |
-        {partial_download, pid(), non_neg_integer() | infinity}.
-
--type options() :: [option()].
-
--type host() :: string() | {integer(), integer(), integer(), integer()}.
-
--type socket_options() :: [{atom(), term()} | atom()].
-
--type window_size() :: non_neg_integer() | infinity.
-
+-record(lhttpc_url, {
+    host :: string(),
+    port :: integer(),
+    path :: string(),
+    is_ssl:: boolean(),
+    user = "" :: string(),
+    password = "" :: string()
+}).

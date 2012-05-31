@@ -42,17 +42,18 @@
 -export([format_hdrs/1, dec/1]).
 
 -include("lhttpc_types.hrl").
+-include("lhttpc.hrl").
 
 %% @spec header_value(Header, Headers) -> undefined | term()
 %% Header = string()
-%% Headers = [{string(), term()}]
+%% Headers = [{header(), term()}]
 %% Value = term()
 %% @doc
 %% Returns the value associated with the `Header' in `Headers'.
 %% `Header' must be a lowercase string, since every header is mangled to
 %% check the match.
 %% @end
--spec header_value(string(), [{string(), Value}]) -> undefined | Value.
+-spec header_value(string(), [{header(), Value}]) -> undefined | Value.
 header_value(Hdr, Hdrs) ->
     header_value(Hdr, Hdrs, undefined).
 
@@ -66,10 +67,14 @@ header_value(Hdr, Hdrs) ->
 %% `Header' must be a lowercase string, since every header is mangled to
 %% check the match.  If no match is found, `Default' is returned.
 %% @end
--spec header_value(string(), [{string(), Value}], Default) ->
+-spec header_value(string(), [{header(), Value}], Default) ->
     Default | Value.
 header_value(Hdr, [{Hdr, Value} | _], _) ->
     Value;
+header_value(Hdr, [{ThisHdr, Value}| Hdrs], Default) when is_atom(ThisHdr) ->
+    header_value(Hdr, [{atom_to_list(ThisHdr), Value}| Hdrs], Default);
+header_value(Hdr, [{ThisHdr, Value}| Hdrs], Default) when is_binary(ThisHdr) ->
+    header_value(Hdr, [{binary_to_list(ThisHdr), Value}| Hdrs], Default);
 header_value(Hdr, [{ThisHdr, Value}| Hdrs], Default) ->
     case string:equal(string:to_lower(ThisHdr), Hdr) of
         true  -> Value;
@@ -88,29 +93,66 @@ header_value(_, [], Default) ->
 -spec maybe_atom_to_list(atom() | list()) -> list().
 maybe_atom_to_list(Atom) when is_atom(Atom) ->
     atom_to_list(Atom);
-maybe_atom_to_list(List) when is_list(List) ->
+maybe_atom_to_list(List) ->
     List.
 
-%% @spec (URL) -> {Host, Port, Path, Ssl}
+%% @spec (URL) -> #lhttpc_url{}
 %%   URL = string()
-%%   Host = string()
-%%   Port = integer()
-%%   Path = string()
-%%   Ssl = boolean()
 %% @doc
--spec parse_url(string()) -> {string(), integer(), string(), boolean()}.
+-spec parse_url(string()) -> #lhttpc_url{}.
 parse_url(URL) ->
     % XXX This should be possible to do with the re module?
-    {Scheme, HostPortPath} = split_scheme(URL),
+    {Scheme, CredsHostPortPath} = split_scheme(URL),
+    {User, Passwd, HostPortPath} = split_credentials(CredsHostPortPath),
     {Host, PortPath} = split_host(HostPortPath, []),
     {Port, Path} = split_port(Scheme, PortPath, []),
-    {string:to_lower(Host), Port, Path, Scheme =:= https}.
+    #lhttpc_url{
+        host = string:to_lower(Host),
+        port = Port,
+        path = Path,
+        user = User,
+        password = Passwd,
+        is_ssl = (Scheme =:= https)
+    }.
 
 split_scheme("http://" ++ HostPortPath) ->
     {http, HostPortPath};
 split_scheme("https://" ++ HostPortPath) ->
     {https, HostPortPath}.
 
+split_credentials(CredsHostPortPath) ->
+    case string:tokens(CredsHostPortPath, "@") of
+        [HostPortPath] ->
+            {"", "", HostPortPath};
+        [Creds, HostPortPath] ->
+            % RFC1738 (section 3.1) says:
+            % "The user name (and password), if present, are followed by a
+            % commercial at-sign "@". Within the user and password field, any ":",
+            % "@", or "/" must be encoded."
+            % The mentioned encoding is the "percent" encoding.
+            case string:tokens(Creds, ":") of
+                [User] ->
+                    % RFC1738 says ":password" is optional
+                    {User, "", HostPortPath};
+                [User, Passwd] ->
+                    {User, Passwd, HostPortPath}
+            end
+    end.
+
+split_host("[" ++ Rest, []) ->
+    % IPv6 address literals are enclosed by square brackets (RFC2732)
+    case string:str(Rest, "]") of
+        0 ->
+            split_host(Rest, "[");
+        N ->
+            {IPv6Address, "]" ++ PortPath0} = lists:split(N - 1, Rest),
+            case PortPath0 of
+                ":" ++ PortPath ->
+                    {IPv6Address, PortPath};
+                _ ->
+                    {IPv6Address, PortPath0}
+            end
+    end;
 split_host([$: | PortPath], Host) ->
     {lists:reverse(Host), PortPath};
 split_host([$/ | _] = PortPath, Host) ->
@@ -170,9 +212,35 @@ normalize_method(Method) when is_atom(Method) ->
 normalize_method(Method) ->
     Method.
 
+%% @spec normalize_headers(RawHeaders) -> Headers
+%%   RawHeaders = [{atom() | binary() | string(), binary() | string()}]
+%%   Headers = headers()
+%% @doc
+%% Turns the headers into binaries suitable for inclusion in a HTTP request
+%% line.
+%% @end
+-spec normalize_headers([{atom() | binary() | string(), binary() | string()}]) ->
+    headers().
+normalize_headers(Headers) ->
+    normalize_headers(Headers, []).
+
+normalize_headers([{Header, Value} | T], Acc) when is_list(Header) ->
+    NormalizedHeader = try list_to_existing_atom(Header)
+    catch
+        error:badarg -> Header
+    end,
+    NewAcc = [{NormalizedHeader, Value} | Acc],
+    normalize_headers(T, NewAcc);
+normalize_headers([{Header, Value} | T], Acc) ->
+    NewAcc = [{Header, Value} | Acc],
+    normalize_headers(T, NewAcc);
+normalize_headers([], Acc) ->
+    Acc.
+
 -spec format_hdrs(headers()) -> iolist().
 format_hdrs(Headers) ->
-    format_hdrs(Headers, []).
+    NormalizedHeaders = normalize_headers(Headers),
+    format_hdrs(NormalizedHeaders, []).
 
 format_hdrs([{Hdr, Value} | T], Acc) ->
     NewAcc = [
@@ -250,5 +318,17 @@ is_chunked(Hdrs) ->
 dec(Num) when is_integer(Num) -> Num - 1;
 dec(Else)                     -> Else.
 
-host(Host, 80)   -> Host;
-host(Host, Port) -> [Host, $:, integer_to_list(Port)].
+host(Host, 80)   -> maybe_ipv6_enclose(Host);
+% When proxying after an HTTP CONNECT session is established, squid doesn't
+% like the :443 suffix in the Host header.
+host(Host, 443)  -> maybe_ipv6_enclose(Host);
+host(Host, Port) -> [maybe_ipv6_enclose(Host), $:, integer_to_list(Port)].
+
+maybe_ipv6_enclose(Host) ->
+    case inet_parse:address(Host) of
+        {ok, {_, _, _, _, _, _, _, _}} ->
+            % IPv6 address literals are enclosed by square brackets (RFC2732)
+            [$[, Host, $]];
+        _ ->
+            Host
+    end.
