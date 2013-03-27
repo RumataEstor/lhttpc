@@ -160,6 +160,7 @@ tcp_test_() ->
                 ?_test(close_connection()),
                 ?_test(message_queue()),
                 ?_test(trailing_space_header()),
+                ?_test(partial_download_close_connection()),
                 ?_test(connection_count()) % just check that it's 0 (last)
             ]}
     }.
@@ -718,6 +719,18 @@ close_connection() ->
     ?assertEqual({error, connection_closed}, lhttpc:request(URL, "GET", [],
             1000)).
 
+partial_download_close_connection() ->
+    Port = start(gen_tcp, [fun large_response_close_connection/5]),
+    URL = url(Port, "/partial"),
+    PartialDownload = [
+        {window_size, 1},
+        {part_size, length(?LONG_BODY_PART) div 2}
+    ],
+    Options = [{partial_download, PartialDownload}],
+    {ok, {Status, _, Pid}} = lhttpc:request(URL, get, [], <<>>, 1000, Options),
+    ?assertEqual({200, "OK"}, Status),
+    ?assertError({case_clause, {error,closed}}, read_partial_body(Pid)).
+
 ssl_get() ->
     Port = start(ssl, [fun simple_response/5]),
     URL = ssl_url(Port, "/simple"),
@@ -1144,3 +1157,19 @@ trailing_space_header(Module, Socket, _, _, _) ->
           "Content-Length: 14 \r\n\r\n"
           ?DEFAULT_STRING
     ).
+
+large_response_close_connection(Module, Socket, _, _, _) ->
+    BodyPart = <<?LONG_BODY_PART>>,
+    ContentLength = 100 * size(BodyPart),
+    Module:send(
+        Socket,
+        [
+            "HTTP/1.1 200 OK\r\n"
+            "Content-type: text/plain\r\n"
+            "Content-length: ", integer_to_list(ContentLength), "\r\n\r\n"
+        ]
+    ),
+    Module:send(Socket, BodyPart),
+    Module:send(Socket, BodyPart),
+    Module:send(Socket, BodyPart),
+    Module:close(Socket).
